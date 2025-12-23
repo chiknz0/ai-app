@@ -1,0 +1,492 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Volume2, VolumeX, Hand, Zap, Trophy, Music, Heart, X } from 'lucide-react';
+import { initializeApp } from "firebase/app";
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "firebase/auth";
+import { getFirestore, collection, addDoc, onSnapshot } from "firebase/firestore";
+
+// --- FIREBASE SETUP ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// --- CONSTANTS ---
+const GAME_DURATION = 60;
+const REACH_COOLDOWN = 800; 
+
+// --- PROCEDURAL GENERATION ---
+const PREFIXES = ["Ancient", "Broken", "Holographic", "Cursed", "Radiant", "Glitched", "Neon", "Dusty", "Super", "Final", "Forgotten", "Stellar", "Rusty", "Digital", "Ghostly", "Hyper", "Shattered", "Golden", "Void", "Solar", "Lunar", "Cyber", "Ethereal", "Mechanical", "Organic", "Pixelated", "Infinite", "Wasted", "Cobalt"];
+const MATERIALS = ["Quartz", "Iron", "Plasma", "Carbon", "Light", "Silicon", "Gravity", "Aether", "Nuclear", "Memory", "Steam", "Clockwork", "Onyx", "Emerald", "Obsidian", "Copper"];
+
+const OBJECT_MAP = {
+  "Relic": ["🗿", "🏺", "⚱️"],
+  "Drive": ["💾", "💽", "📼"],
+  "Shard": ["💎", "✨", "🧊"],
+  "Core": ["🧿", "🔮", "⚛️"],
+  "Module": ["📼", "📟", "🔋"],
+  "Tome": ["📖", "📜", "📒"],
+  "Link": ["🔗", "⛓️", "🧬"],
+  "Battery": ["🔋", "⚡", "🔌"],
+  "Sphere": ["🔮", "⚪", "🌑"],
+  "Tablet": ["📱", "🗿", "📲"],
+  "Capsule": ["💊", "🧪", "🥚"],
+  "Key": ["🗝️", "🔑", "🔐"],
+  "Transmitter": ["📡", "📻", "🎙️"],
+  "Engine": ["⚙️", "🔧", "🔩"],
+  "Beacon": ["🚨", "🏮", "🕯️"],
+  "Fragment": ["🧩", "❄️", "☄️"],
+  "Cell": ["🦠", "🧬", "🧫"],
+  "Node": ["💠", "🕸️", "⏺️"],
+  "Crystal": ["💎", "🧊", "🔷"],
+  "Circuit": ["🔌", "💻", "🎛️"]
+};
+
+const OBJECT_KEYS = Object.keys(OBJECT_MAP);
+
+const generateItems = () => {
+  const items = [
+    { name: "The Last Save File", value: 50000, color: "#a855f7", emoji: "💾", rarity: "Legendary" },
+    { name: "End of Time Prism", value: 500000, color: "#facc15", emoji: "💠", rarity: "Mythical" }
+  ];
+  for (let i = 0; i < 1100; i++) {
+    const pre = PREFIXES[Math.floor(Math.random() * PREFIXES.length)];
+    const mat = MATERIALS[Math.floor(Math.random() * MATERIALS.length)];
+    const objKey = OBJECT_KEYS[Math.floor(Math.random() * OBJECT_KEYS.length)];
+    const emoji = OBJECT_MAP[objKey][Math.floor(Math.random() * OBJECT_MAP[objKey].length)];
+    
+    const rarityVal = Math.random();
+    let rarity, value;
+    if (rarityVal > 0.99) { rarity = "Mythical"; value = 150000; }
+    else if (rarityVal > 0.95) { rarity = "Legendary"; value = 40000; }
+    else if (rarityVal > 0.85) { rarity = "Epic"; value = 12000; }
+    else if (rarityVal > 0.65) { rarity = "Rare"; value = 3000; }
+    else { rarity = "Common"; value = 400; }
+    
+    items.push({ name: `${pre} ${mat} ${objKey}`, value, emoji, rarity });
+  }
+  return items;
+};
+
+const ALL_ITEMS = generateItems();
+
+// --- AUDIO ENGINE ---
+let audioCtx = null;
+const playSound = (type, isMuted) => {
+  if (isMuted) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    if (type === 'bubble') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(1200, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(400, audioCtx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.05, audioCtx.currentTime);
+      gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.1);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.1);
+    } else if (type === 'reach') {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(120, audioCtx.currentTime);
+      osc.frequency.linearRampToValueAtTime(40, audioCtx.currentTime + 0.4);
+      gain.gain.setValueAtTime(0.03, audioCtx.currentTime);
+      gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.4);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.4);
+    } else if (type === 'legendary') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(220, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(1200, audioCtx.currentTime + 0.8);
+      gain.gain.setValueAtTime(0.08, audioCtx.currentTime);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 1);
+    }
+  } catch (e) { console.warn("Audio Context failed", e); }
+};
+
+export default function App() {
+  const [gameState, setGameState] = useState('start');
+  const [score, setScore] = useState(0);
+  const [timeLeft, setTimeLeft] = useState(GAME_DURATION);
+  const [pulledItems, setPulledItems] = useState([]);
+  const [isPulling, setIsPulling] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const [cooldown, setCooldown] = useState(false);
+  const [isLegendaryRoll, setIsLegendaryRoll] = useState(false);
+  const [legendaryItem, setLegendaryItem] = useState(null);
+  
+  const [leaderboard, setLeaderboard] = useState([]);
+  const [playerName, setPlayerName] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [user, setUser] = useState(null);
+
+  const playerRef = useRef(null);
+
+  // --- INITIALIZATION ---
+  useEffect(() => {
+    const handleMove = (e) => setMousePos({ x: e.clientX, y: e.clientY });
+    window.addEventListener('mousemove', handleMove);
+
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+            await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+            await signInAnonymously(auth);
+        }
+      } catch (error) { console.error("Auth failed:", error); }
+    };
+    initAuth();
+
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => setUser(currentUser));
+
+    // YouTube Audio Setup
+    if (!window.YT) {
+      const tag = document.createElement('script');
+      tag.src = "https://www.youtube.com/iframe_api";
+      const firstScriptTag = document.getElementsByTagName('script')[0];
+      firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+      
+      window.onYouTubeIframeAPIReady = () => {
+        playerRef.current = new window.YT.Player('bg-music-player', {
+          height: '0',
+          width: '0',
+          videoId: 'Og6Yu54arDE',
+          playerVars: { 
+            'autoplay': 0, 
+            'controls': 0, 
+            'loop': 1, 
+            'playlist': 'Og6Yu54arDE',
+            'mute': 0,
+            'origin': window.location.origin
+          },
+          events: {
+            'onReady': (event) => {
+                event.target.setVolume(25);
+            }
+          }
+        });
+      };
+    }
+
+    return () => {
+        window.removeEventListener('mousemove', handleMove);
+        unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const q = collection(db, 'artifacts', appId, 'public', 'data', 'leaderboard');
+    return onSnapshot(q, (snapshot) => {
+        const scores = [];
+        snapshot.forEach((doc) => scores.push(doc.data()));
+        scores.sort((a, b) => b.score - a.score);
+        setLeaderboard(scores.slice(0, 10));
+    }, (err) => console.error("Leaderboard Error:", err));
+  }, [user]);
+
+  const handleStartGame = () => {
+    setGameState('playing');
+    // Ensure music starts on user gesture
+    if (playerRef.current && typeof playerRef.current.playVideo === 'function') {
+      playerRef.current.unMute();
+      playerRef.current.playVideo();
+    }
+  };
+
+  useEffect(() => {
+    let timer;
+    if (gameState === 'playing' && timeLeft > 0) {
+      timer = setInterval(() => setTimeLeft(t => t - 1), 1000);
+    } else if (timeLeft === 0 && gameState === 'playing') {
+      setGameState('finished');
+    }
+    return () => clearInterval(timer);
+  }, [gameState, timeLeft]);
+
+  const performPull = useCallback(() => {
+    if (gameState !== 'playing' || isPulling || cooldown || isLegendaryRoll) return;
+    
+    setIsPulling(true);
+    setCooldown(true);
+    playSound('reach', isMuted);
+
+    const item = ALL_ITEMS[Math.floor(Math.random() * ALL_ITEMS.length)];
+
+    setTimeout(() => {
+      if (item.rarity === 'Legendary' || item.rarity === 'Mythical') {
+        setLegendaryItem(item);
+        setIsLegendaryRoll(true);
+        playSound('legendary', isMuted);
+        
+        setTimeout(() => {
+          setIsLegendaryRoll(false);
+          setScore(s => s + item.value);
+          setIsPulling(false);
+          setPulledItems(prev => [...prev, { ...item, id: Date.now() }]);
+          setTimeout(() => setCooldown(false), REACH_COOLDOWN);
+        }, 4000);
+      } else {
+        setScore(s => s + item.value);
+        setPulledItems(prev => [...prev, { ...item, id: Date.now() }]);
+        playSound('bubble', isMuted);
+
+        setTimeout(() => {
+          setIsPulling(false);
+          setTimeout(() => setCooldown(false), REACH_COOLDOWN);
+        }, 400);
+      }
+    }, 500);
+  }, [gameState, isPulling, cooldown, isMuted, isLegendaryRoll]);
+
+  useEffect(() => {
+    if (pulledItems.length > 0) {
+      const timer = setTimeout(() => setPulledItems(prev => prev.slice(1)), 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [pulledItems]);
+
+  const submitScore = async () => {
+    if (!playerName.trim() || !user) return;
+    setSubmitting(true);
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'leaderboard'), {
+        name: playerName,
+        score: score,
+        date: new Date().toISOString()
+      });
+      setGameState('start');
+      setScore(0);
+      setTimeLeft(GAME_DURATION);
+      setPlayerName('');
+    } catch (e) { console.error("Error saving score", e); }
+    setSubmitting(false);
+  };
+
+  const handleMuteToggle = () => {
+    const nextMuted = !isMuted;
+    setIsMuted(nextMuted);
+    if (playerRef.current) {
+        if (nextMuted) playerRef.current.mute();
+        else playerRef.current.unMute();
+    }
+  };
+
+  const handleDonate = () => {
+    window.open('https://www.buymeacoffee.com/afterglowechoes', '_blank');
+  };
+
+  return (
+    <div className="relative h-screen w-full bg-[#020205] text-slate-200 font-sans flex flex-col items-center justify-center overflow-hidden cursor-none selection:bg-cyan-500/30 touch-none">
+      
+      <div id="bg-music-player" className="absolute top-0 left-0 opacity-0 pointer-events-none -z-50" />
+
+      {/* CUSTOM CURSOR */}
+      <div 
+        className="fixed pointer-events-none z-[9999] w-8 h-8 rounded-full hidden md:flex items-center justify-center transition-transform duration-75 mix-blend-screen"
+        style={{ 
+          left: mousePos.x, 
+          top: mousePos.y, 
+          transform: 'translate(-50%, -50%)',
+          background: 'radial-gradient(circle, rgba(34,211,238,0.4) 0%, transparent 70%)'
+        }}
+      >
+        <div className="w-1.5 h-1.5 bg-cyan-400 rounded-full shadow-[0_0_10px_#22d3ee]" />
+      </div>
+
+      <style>{`
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        @keyframes rain { 0% { transform: translateY(-100px); opacity: 0; } 50% { opacity: 0.5; } 100% { transform: translateY(100vh); opacity: 0; } }
+        @keyframes floatLogo { 0%, 100% { transform: translateX(-10px); } 50% { transform: translateX(10px); } }
+        @keyframes float-out {
+          0% { transform: translateY(50px) scale(0.5); opacity: 0; }
+          20% { transform: translateY(-100px) scale(1.2); opacity: 1; }
+          80% { transform: translateY(-200px) scale(1); opacity: 1; }
+          100% { transform: translateY(-250px) scale(0.8); opacity: 0; }
+        }
+        @keyframes nebulaDrift {
+            0% { transform: scale(1) translate(0, 0); }
+            50% { transform: scale(1.1) translate(-2%, 2%); }
+            100% { transform: scale(1) translate(0, 0); }
+        }
+        .anim-fade-in { animation: fadeIn 1s ease-out forwards; }
+        .anim-slide-up { animation: slideUp 1s ease-out 0.3s forwards; opacity: 0; }
+        .anim-rain { animation: rain linear infinite; }
+        .anim-float-out { animation: float-out 1.5s ease-out forwards; }
+        .anim-logo { animation: floatLogo 4s ease-in-out infinite; }
+        .anim-nebula { animation: nebulaDrift 20s linear infinite; }
+      `}</style>
+
+      {/* GALAXY BACKGROUND */}
+      <div className="absolute inset-0 z-0 pointer-events-none overflow-hidden">
+        <div className="absolute inset-0 bg-black" />
+        <div className="absolute inset-[-10%] opacity-40 anim-nebula" 
+             style={{ background: 'radial-gradient(circle at 30% 40%, #1e1b4b 0%, transparent 50%), radial-gradient(circle at 70% 60%, #312e81 0%, transparent 50%)' }} />
+        <div className="absolute inset-[-5%] opacity-30 anim-nebula" 
+             style={{ animationDirection: 'reverse', background: 'radial-gradient(circle at 50% 50%, #4c1d95 0%, transparent 60%)', filter: 'blur(40px)' }} />
+        <div className="absolute inset-0 opacity-20" 
+             style={{ backgroundImage: 'radial-gradient(2px 2px at 20px 30px, #fff, transparent)', backgroundSize: '150px 150px' }} />
+      </div>
+
+      {/* START SCREEN */}
+      {gameState === 'start' && (
+        <div className="z-30 text-center space-y-4 md:space-y-8 px-4">
+          <div className="anim-fade-in flex flex-col items-center">
+             <div className="inline-flex items-center gap-3 px-3 py-1 bg-cyan-500/10 border border-cyan-500/20 rounded-full text-cyan-400 text-[8px] md:text-[10px] font-bold tracking-[0.3em] uppercase mb-4 md:mb-8">
+              <Music size={12} /> Live Resonance: Rooftop
+            </div>
+            <div className="anim-logo">
+                <h1 className="text-[3.5rem] md:text-[8rem] font-black leading-none tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-white via-cyan-100 to-slate-600 drop-shadow-[0_0_30px_rgba(255,255,255,0.2)]">
+                AFTERGLOW<br/><span className="text-cyan-800">ECHOES</span>
+                </h1>
+            </div>
+            <p className="text-slate-500 tracking-[0.2em] mt-4 md:mt-6 uppercase text-[10px] md:text-xs px-6">Salvage the memories of a digital sky</p>
+          </div>
+          
+          <div className="anim-slide-up">
+            <button 
+              onClick={handleStartGame}
+              className="group relative px-10 py-5 md:px-16 md:py-7 bg-white text-black font-black text-lg md:text-xl rounded-full transition-all 
+                         hover:bg-cyan-50 hover:shadow-[0_0_50px_rgba(34,211,238,0.4)] hover:scale-105 active:scale-95
+                         flex items-center gap-4 mx-auto"
+            >
+              START SALVAGE <Zap size={22} className="text-cyan-600 animate-pulse" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* LEADERBOARD */}
+      {gameState === 'start' && (
+        <div className="absolute bottom-24 lg:bottom-auto lg:top-10 lg:right-10 z-40 w-full lg:w-auto px-6 anim-fade-in">
+          <div className="p-4 md:p-6 bg-slate-950/60 backdrop-blur-xl border border-white/5 rounded-2xl shadow-2xl lg:rotate-[-2deg]">
+            <h3 className="text-[9px] tracking-[0.4em] text-cyan-400 font-bold mb-3 uppercase flex items-center gap-2">
+              <Trophy size={12} /> Global Archives
+            </h3>
+            <div className="space-y-2 max-h-[150px] overflow-y-auto">
+              {leaderboard.map((e, i) => (
+                <div key={i} className="flex justify-between text-[10px] border-b border-white/5 pb-2 gap-8">
+                  <span className="font-mono text-slate-400 uppercase">{e.name}</span>
+                  <span className="font-mono font-bold text-cyan-300">${e.score.toLocaleString()}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* GAMEPLAY HUD */}
+      {gameState === 'playing' && !isLegendaryRoll && (
+        <div className="z-30 flex flex-col items-center w-full max-w-5xl h-full py-6 md:py-12 gap-6 md:gap-12 anim-fade-in relative px-4">
+          <div className="w-full flex justify-between items-center">
+             <div className="bg-slate-950/80 backdrop-blur px-4 py-3 md:px-8 md:py-5 rounded-2xl md:rounded-3xl border border-white/10 shadow-xl">
+                <div className="text-[8px] md:text-[10px] tracking-[0.4em] text-slate-500 uppercase mb-1">Salvage</div>
+                <div className="text-2xl md:text-5xl font-black text-cyan-50 tracking-tighter">${score.toLocaleString()}</div>
+             </div>
+             <div className="bg-slate-950/80 backdrop-blur px-4 py-3 md:px-8 md:py-5 rounded-2xl md:rounded-3xl border border-white/10 shadow-xl text-right">
+                <div className="text-[8px] md:text-[10px] tracking-[0.4em] text-pink-500 uppercase mb-1">Relay</div>
+                <div className={`text-2xl md:text-5xl font-black tracking-tighter ${timeLeft < 10 ? 'text-pink-500 animate-pulse' : 'text-slate-100'}`}>{timeLeft}s</div>
+             </div>
+          </div>
+
+          <div className="relative flex flex-col items-center justify-center flex-1 w-full max-h-[60vh]">
+             <div className="absolute top-0 left-0 w-full h-full pointer-events-none z-40 flex justify-center">
+                {pulledItems.map((item) => (
+                  <div key={item.id} className="absolute anim-float-out text-[4rem] md:text-[7rem] drop-shadow-[0_0_40px_rgba(34,211,238,0.5)]">
+                    {item.emoji}
+                  </div>
+                ))}
+             </div>
+
+             <div className="w-[200px] h-[80px] md:w-[360px] md:h-[140px] bg-black rounded-[100%] border-[4px] md:border-[8px] border-slate-900 shadow-[0_20px_50px_rgba(0,0,0,0.9)] flex items-center justify-center relative z-20 overflow-hidden">
+                <div className={`absolute bottom-full transition-all duration-300 z-10 ${isPulling ? 'translate-y-[135%]' : 'translate-y-0'}`}>
+                   <div className="w-12 md:w-20 h-[500px] bg-gradient-to-b from-slate-700 via-slate-900 to-black rounded-full border-x border-white/5 relative">
+                      <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-4 md:-translate-y-8 scale-[1.2] md:scale-[1.8] text-slate-400">
+                         <Hand size={40} className="rotate-180" />
+                      </div>
+                   </div>
+                </div>
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_transparent_40%,_black_90%)] z-30" />
+             </div>
+
+             <button 
+              onMouseDown={performPull}
+              onTouchStart={performPull}
+              disabled={cooldown}
+              className={`mt-10 md:mt-20 relative px-12 py-6 md:px-24 md:py-10 rounded-full font-black text-xl md:text-3xl tracking-[0.4em] md:tracking-[0.6em] transition-all duration-150 shadow-2xl
+                ${cooldown ? 'bg-slate-900 text-slate-700 scale-95 opacity-50' : 
+                'bg-white text-black hover:bg-cyan-50 hover:scale-105 active:scale-90'}`}
+            >
+               {cooldown ? 'WAITING' : 'REACH'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* LEGENDARY OVERLAY */}
+      {isLegendaryRoll && (
+        <div className="fixed inset-0 z-[10000] bg-black/95 flex items-center justify-center anim-fade-in p-6">
+          <div className="relative z-10 text-center scale-75 md:scale-110">
+            <div className="bg-slate-900/50 backdrop-blur-3xl p-10 md:p-20 rounded-[3rem] md:rounded-[4rem] border border-cyan-500/20 shadow-[0_0_100px_rgba(34,211,238,0.2)]">
+              <div className="text-cyan-400 tracking-[1em] uppercase text-[10px] md:text-[12px] mb-4 md:mb-8 font-bold">Rarity: {legendaryItem?.rarity}</div>
+              <div className="text-[6rem] md:text-[12rem] mb-6 md:mb-10 animate-bounce drop-shadow-[0_0_50px_white]">{legendaryItem?.emoji}</div>
+              <div className="text-xl md:text-3xl font-black text-white uppercase tracking-[0.2em] md:tracking-[0.5em]">{legendaryItem?.name}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* END SCREEN */}
+      {gameState === 'finished' && (
+        <div className="z-50 flex flex-col items-center space-y-6 md:space-y-10 anim-fade-in bg-slate-950/90 p-8 md:p-16 rounded-[2rem] md:rounded-[3rem] border border-white/10 backdrop-blur-3xl shadow-2xl mx-4 max-w-sm md:max-w-none">
+          <Trophy size={60} className="text-yellow-400 animate-pulse" />
+          <div className="text-center">
+            <h2 className="text-2xl md:text-4xl font-black text-white mb-2 uppercase tracking-widest">Shift Terminated</h2>
+            <div className="text-4xl md:text-7xl font-mono text-cyan-400 font-bold tracking-tighter">${score.toLocaleString()}</div>
+          </div>
+          
+          <div className="w-full space-y-4 md:space-y-6">
+            <input 
+              type="text" 
+              placeholder="CALLSIGN"
+              maxLength={12}
+              value={playerName}
+              onChange={(e) => setPlayerName(e.target.value)}
+              className="w-full bg-black/50 border border-white/10 p-4 md:p-5 rounded-xl md:rounded-2xl text-center font-mono text-white text-lg md:text-xl placeholder:text-slate-700 outline-none focus:border-cyan-500 uppercase transition-all"
+            />
+            <button 
+              onClick={submitScore}
+              disabled={submitting}
+              className="w-full bg-cyan-500 text-black py-4 md:py-5 rounded-xl md:rounded-2xl font-black text-md md:text-lg tracking-[0.4em] hover:bg-cyan-400 transition-all disabled:opacity-50"
+            >
+              {submitting ? 'SYNCING...' : 'ARCHIVE RECORD'}
+            </button>
+          </div>
+          <button onClick={() => setGameState('start')} className="text-[10px] text-slate-500 hover:text-white uppercase tracking-[0.4em]">Abort Memory</button>
+        </div>
+      )}
+
+      {/* FOOTER CONTROLS */}
+      <div className="fixed bottom-6 md:bottom-10 left-6 md:left-10 flex items-center gap-3 md:gap-4 z-[100]">
+        <button onClick={handleMuteToggle} className="p-3 md:p-4 bg-white/5 hover:bg-white/10 rounded-full transition-all border border-white/5 group">
+          {isMuted ? <VolumeX size={18} /> : <Volume2 size={18} className="text-cyan-400 group-hover:scale-110 transition-transform" />}
+        </button>
+        <button 
+            onClick={handleDonate}
+            className="flex items-center gap-2 px-4 py-3 md:px-5 md:py-4 bg-pink-500/10 hover:bg-pink-500/20 rounded-full transition-all border border-pink-500/20 group"
+        >
+            <Heart size={16} className="text-pink-500 group-hover:fill-pink-500 group-hover:scale-110 transition-transform" />
+            <span className="text-[8px] md:text-[10px] font-bold tracking-widest text-pink-500 uppercase">Support archives</span>
+        </button>
+      </div>
+
+    </div>
+  );
+}
